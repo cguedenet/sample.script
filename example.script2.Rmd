@@ -1,0 +1,300 @@
+---
+title: "Example R script"
+author: "CRG"
+date: "May  2019"
+output: html_document
+---
+
+The following R script is illustrative of the workflow I follow in R as a Monitoring, Evaluation, and Learning (MEL) Advisor at IREX. This example rmarkdown document pulls from an analysis I did for a youth-led labor market assessment in Southern Africa. 
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = 'asis'
+)
+```
+
+```{r}
+# load packages
+library(pacman)
+p_load(tidyverse, sjmisc, janitor, knitr, ggthemes, corrplot, corrr, summarytools, corrplot, ggpubr, ggalt, RCurl, viridis)
+```
+# load data  
+```{r load data}
+youth <- read.csv(text = getURL("https://raw.githubusercontent.com/cguedenet/sample/master/youth2.csv"))
+```
+
+#examine data
+```{r examine data, eval = FALSE}
+empty <- names(empty_cols(youth))
+youth %>% remove_cols(empty) %>% data.frame() %>% glimpse()
+```
+
+
+# data cleaning using janitor package
+```{r data cleaning, eval = TRUE, echo = FALSE}
+# change all empty cells to na values using sjmisc package
+youth <- youth %>% set_na(na = "", drop.levels = TRUE)
+
+## Any empty columns or rows?
+empty_cols(youth)
+empty_rows(youth)
+
+##remove all empty rows
+youth <- youth %>% remove_empty("rows")
+
+##remove all numeric responses for "region" variable.These were submissions from an early pilot version of the survey
+youth <- youth %>% filter(!region %in% c(5,6,8)) %>%
+  droplevels(.)
+
+##frequency table 
+table(youth$region)
+```
+
+# recode data  
+```{r recoding}
+# group response options: For tenure question (#38), recode all responses that are 6 or greater as "6 or more"
+youth <- youth %>% mutate(number_of_years = as.factor(case_when(
+  .$number_of_years == "6" ~ "6 or more",
+  .$number_of_years == "7" ~ "6 or more",
+  .$number_of_years == "8" ~ "6 or more",
+  .$number_of_years == "9" ~ "6 or more",
+  .$number_of_years == "10" ~ "6 or more",
+  .$number_of_years == "11" ~ "6 or more",
+  TRUE ~ as.character(.$number_of_years)
+)))
+
+# create new variable: employ.status
+youth <- youth %>% mutate(employ.status = ifelse(youth$status == "Not_currently_working", "unemployed", "employed"))
+
+# create new variable - Number of years since finishing studies
+youth <- youth %>% mutate(yearsFinished = 2018 - year_studies)
+```
+
+#rename variables
+```{r rename}
+#rename variables with employment obstacles
+youth <- rename(youth, Obs_No_education = obstacles_1,
+                 Obs_Unsuitable_general_ed=obstacles_2,
+                 Obs_Unsuitable_vocational_ed=obstacles_3,
+                 Obs_No_suitable_training=obstacles_4,
+                 Obs_Requirements=obstacles_5,
+                 Obs_training_received=obstacles_6,
+                 Obs_No_work_experience=obstacles_7,
+                 Obs_Not_enough_jobs=obstacles_8,
+                 Obs_Considered_too_young=obstacles_9,
+                 Obs_Being_male.female=obstacles_10,
+                 Obs_Discriminatory_prej=obstacles_11,
+                 Obs_Low_wages=obstacles_12,
+                 Obs_Poor_working_conditions=obstacles_13,
+                 Obs_Disability=obstacles_14,
+                 Obs_Health_issues=obstacles_15,
+                 Obs_Other2=obstacles_16)
+```
+
+# check for missing values  
+```{r missing values}
+# create new column with totals for number of missing responses; filter to include only those with more 100 NAs (i.e. about 40% of all questions left blank)
+youth <- youth %>% row_count(count = NA, var = "rowcount", append = TRUE)
+
+# quick check on number and percentage of missing responses per column
+youth %>%
+  tabyl(rowcount) %>%
+  adorn_pct_formatting(digits = 2) %>%
+  arrange(desc(rowcount)) %>%
+  kable()
+
+## why do some surveys have so many missing values?
+descr(youth$rowcount) # 25% of surveys have more than 65 missing values
+
+# employed and unemployed youth got different questions
+```
+
+#Check for outliers for question about the number of jobs youth had applied for in the last 12 months
+```{r outliers}
+
+kable(frq(youth$jobs))
+
+#First, remove extreme outliers that overly influence mean and SD
+youth.jobs <- youth %>%
+  filter(jobs < 100)
+
+# create boxplot
+boxplot(youth.jobs$jobs)
+
+#isolate outliers (defining this as all values at least 3 standard deviations from mean)
+outliers <- boxplot(youth.jobs$jobs, range = 3, plot = FALSE)$out
+
+#remove outliers
+youth.jobs <- youth.jobs %>% filter(!jobs %in% outliers)
+
+#summary table
+youth.jobs %>% frq(jobs) %>% kable()
+```
+
+#Tabulations
+```{r tabulations, results = 'asis'}
+# cross-tabulation of youth education and employment status
+youth %>%
+  flat_table(employ.status, education) %>%
+  data.frame() %>%
+  spread(employ.status, Freq) %>%
+  kable()
+
+# cross-tabulation of region and discriminatory prejudices
+youth %>%
+  flat_table(region, Obs_Discriminatory_prej) %>%
+  data.frame() %>%
+  kable()
+```
+
+#Analysis
+###Comparison of obstacles cited by employed and unemployed  
+```{r analysis}
+youth %>%
+  select("employ.status",85:100) %>%
+  gather("obstacles", "n",2:17) %>%
+  filter(n==1) %>%
+  tabyl(obstacles, employ.status) %>%
+  mutate(difference = abs(employed - unemployed)) %>%
+  adorn_totals("col") %>%
+  arrange(desc(Total)) %>%
+  kable()
+```
+
+##To what extent do you believe these identities affect people's ability to get a job?
+```{r analysis2}
+identities <- data.frame(sapply(youth[, 103:107], flat_table, margin = "row")) %>%
+  filter(Gender != 0) %>%
+  mutate(name = c("A great deal", "Never", "Occasionally")) %>%
+  select(c(6, 1:5)) %>%
+  .[c(2, 3, 1), ]
+ 
+kable(identities)
+```
+
+#visualize contingency table using Balloon plot from ggpubr package
+```{r }
+#create matrix-like data frame with row names
+row.names(identities) <- identities$name 
+identities <- identities[,-1]
+
+# balloon plot
+ggballoonplot(identities, fill = "value", color = "lightgray",
+              show.label = TRUE, font.label = c(12,"plain","white"),
+              size = 14) +
+  scale_fill_viridis(direction = -1, option = "inferno") +
+  theme_minimal() +
+  theme(axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12),
+        axis.text = element_text(size = 10)) +
+  theme(panel.grid.major = element_line(color = "#d8e6e6"),
+        panel.grid.minor = element_line("#d8e6e6")) +
+  labs(title = "frequency table", x = "identities", y = "response options")
+```
+
+## association between prejudice as an obstacle and region  
+```{r}
+## gather obstacles in long format
+obstaclesAll <- youth %>%
+  select(85:100) %>%
+  gather("obstacles", "sum") %>%
+  group_by(obstacles) %>%
+  summarise(total = sum(sum, na.rm = TRUE)) %>%
+  arrange(desc(total))
+
+#youth and prejudice obstacle crosstabs. There may be an association between youth from region 3 and the belief that regional origin is an obstacle to getting a job
+youth %>% flat_table(reg_origina,region, margin = "col") %>% data.frame() %>%
+  spread(region, Freq) %>%
+  kable()
+
+##Pearson's Chi-squared Test with stats package
+#association between a youth's home region and the belief that region as affecting a person's ability to get a job
+corrTable <- chisq.test(youth$region, youth$reg_origina)
+
+corrTable
+
+#look at residuals
+corrplot(corrTable$residuals, is.cor = FALSE, tl.col = "black", cl.ratio = 0.2, cl.align.text = "l")
+```
+
+
+
+##minimum income
+```{r geomerror, fig.height=4, fig.width=7}
+# Is there a minimum income below which you would not accepted a job?
+
+# comparison with education
+incomel <- youth %>%
+  group_by(education) %>%
+  summarise(mn = mean(min_incomelevel, na.rm = TRUE), med = median(min_incomelevel, na.rm = TRUE), dist = n_distinct(min_incomelevel), min = min(min_incomelevel, na.rm = TRUE), max = max(min_incomelevel, na.rm = TRUE), sd = sd(min_incomelevel, na.rm = TRUE), IQR = IQR(min_incomelevel, na.rm = TRUE)) %>%
+  data.frame() %>%
+   na.omit(.)
+
+## get rid of underscores (converts to character format)
+incomel$education <- gsub("_", " ", incomel$education)
+
+## create nice looking plot
+labels <- incomel$education
+averages <- incomel$mn
+ranges <- incomel$IQR
+
+# geom_point plot with error bars
+plot1 <- ggplot(incomel, aes(averages, labels)) + geom_point(aes(color = "red", size = .8)) + scale_x_continuous(labels = scales::comma) +
+  geom_errorbarh(aes(xmin = averages - ranges, xmax = averages + ranges, height = .2, width = .3), color = "black") +
+  labs(title = "Minimum income levels youth would accept", subtitle = "Range and average values", x = "Minimum Acceptable Income", y = "Education Level") + theme(
+    axis.text = element_text(size = 11),
+    axis.text.x = element_text(size = 11),
+    plot.title = element_text(size = 11, face = "bold", hjust = 2),
+    plot.subtitle = element_text(hjust = -2))
+
+plot1 <-  plot1 +  geom_hline(yintercept = 0, size =1, colour = "#9ba7a7") +
+  theme_minimal() +
+  theme(axis.ticks.x=element_blank(),
+        panel.grid.major = element_line(color = "#d8e6e6" ),
+        panel.grid.minor = element_line("#d8e6e6"),
+        axis.title = element_text(face = "bold"),
+        legend.position = "none")
+
+print(plot1)
+```
+
+#visualizations
+
+```
+
+##lollipop charts
+```{r, fig.width = 10}
+library(ggalt)
+lolli <- youth %>% select(ID,status, region) %>%
+  na.omit(.) %>% data.frame() %>%
+  add_count(region, name = "regFreq") %>%
+  add_count(status,region, name = "status.regFreq") %>%
+  mutate(region2 = paste(region," ","(n=", regFreq,")"))
+  
+#take out underscores periods in status variable
+lolli$status <- gsub("[_.]", " ", lolli$status)
+
+#reorder status variable from least to greatest n
+lolli$status <- fct_reorder2(lolli$status,lolli$regFreq,lolli$status.regFreq)
+
+# lollipo chart
+lolliPlot <- ggplot(lolli, aes(status, status.regFreq)) +
+  geom_lollipop(point.colour="#098b8e", point.size=5) +
+  coord_flip() +
+  facet_wrap(~region2)
+
+#add theme elements
+lolliPlot + scale_y_continuous(expand=c(0,0),limits=c(0, 55)) +
+  coord_flip() +
+  labs(x=NULL, y=NULL) +
+  theme_minimal() +
+  theme(panel.grid.major.y=element_blank()) +
+  theme(panel.grid.minor=element_blank()) +
+  theme(axis.line.y=element_line(color="#9ba7a7", size=0.15))+
+  theme(axis.text.y=element_text(margin=margin(r=5,l=0),size=10,face="bold"))+
+  theme(axis.text.x=element_text(size=11))+
+  theme(plot.margin=unit(c(30,30,30,30),"pt"))
+```
